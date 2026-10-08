@@ -13,7 +13,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from .. import db
-from ..config import BACKTESTS_DIR, MIN_ORDER_NOTIONAL, SOL_QTY_STEP, TARGET_SYMBOL
+from ..config import BACKTESTS_DIR
+from ..data.symbols import order_filters
 from ..data.series import open_series
 from ..models.train import get_model_run, load_oof
 from .engine import EngineParams, simulate, simulate_with_gaps
@@ -24,9 +25,14 @@ MAX_EQUITY_POINTS = 3000
 
 def normalize_params(params: dict[str, Any], model_params: dict[str, Any]) -> dict[str, Any]:
     label = model_params["label"]
+    symbol = model_params.get("target_symbol", "SOLUSDT")
+    qty_step, min_notional = (
+        (params["qty_step"], params["min_notional"]) if "qty_step" in params and "min_notional" in params else order_filters(symbol)
+    )
     return {
         "name": params.get("name") or f"Backtest {time.strftime('%Y-%m-%d %H:%M')}",
         "model_run_id": params["model_run_id"],
+        "symbol": symbol,
         "start_ts": params.get("start_ts"),
         "end_ts": params.get("end_ts"),
         "threshold": float(params.get("threshold", 0.6)),
@@ -40,8 +46,8 @@ def normalize_params(params: dict[str, Any], model_params: dict[str, Any]) -> di
         "sizing": params.get("sizing", "compound"),
         "order_quote": float(params.get("order_quote", 10.0)),
         "compound_fraction": float(params.get("compound_fraction", 1.0)),
-        "min_notional": float(params.get("min_notional", MIN_ORDER_NOTIONAL)),
-        "qty_step": float(params.get("qty_step", SOL_QTY_STEP)),
+        "min_notional": float(params.get("min_notional", min_notional)),
+        "qty_step": float(params.get("qty_step", qty_step)),
         "cooldown_minutes": int(params.get("cooldown_minutes", 0)),
     }
 
@@ -264,7 +270,7 @@ def _decisions(run_id: str, params: dict[str, Any]) -> tuple[np.ndarray, np.ndar
 
 
 def run_single(backtest_id: str, params: dict[str, Any], ctx) -> dict[str, Any]:
-    series = open_series(TARGET_SYMBOL)
+    series = open_series(params["symbol"])
     decision_ts, prob, start, end = _decisions(params["model_run_id"], params)
     ctx.progress(0.1, f"Simulating {len(decision_ts):,} decisions", force=True)
     result = simulate(decision_ts, prob, series, engine_params(params))
@@ -304,7 +310,7 @@ def run_single(backtest_id: str, params: dict[str, Any], ctx) -> dict[str, Any]:
 
 
 def run_sweep(backtest_id: str, params: dict[str, Any], ctx) -> dict[str, Any]:
-    series = open_series(TARGET_SYMBOL)
+    series = open_series(params["symbol"])
     decision_ts, prob, start, end = _decisions(params["model_run_id"], params)
     rows = []
     combos = [(threshold, tp, sl) for threshold in params["thresholds"] for tp, sl in params["tp_sl_pairs"]]

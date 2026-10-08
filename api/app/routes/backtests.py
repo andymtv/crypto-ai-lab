@@ -27,7 +27,9 @@ class BacktestRequest(BaseModel):
     sizing: str = Field("compound", pattern="^(fixed|compound)$")
     order_quote: float = Field(10.0, gt=0)
     compound_fraction: float = Field(1.0, gt=0, le=1)
-    min_notional: float = Field(5.0, ge=0)
+    # Default: the traded coin's Binance filters.
+    min_notional: float | None = Field(None, ge=0)
+    qty_step: float | None = Field(None, gt=0)
     cooldown_minutes: int = Field(0, ge=0, le=1440)
 
 

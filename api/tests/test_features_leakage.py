@@ -40,11 +40,26 @@ def test_features_do_not_change_when_the_future_is_removed(bars, full_features, 
 
 def test_higher_timeframe_values_only_change_when_their_bar_closes(full_features):
     ts = full_features["ts"]
-    rsi = full_features["sol_1h_rsi14"]
+    rsi = full_features["target_1h_rsi14"]
     changes = ts[1:][np.diff(np.nan_to_num(rsi, nan=-1)) != 0]
     # A 1h bar opening at H is known at the row of its last minute (H + 59 min).
     assert len(changes) > 0
     assert np.all(changes % 3600 == 3540)
+
+
+@pytest.mark.parametrize("cut", [2222, 3600])
+def test_target_only_features_do_not_leak_either(bars, cut):
+    sol, _ = bars
+    full = compute_features(sol, None)
+    truncated = compute_features(sol.iloc[:cut], None)
+    assert not any(name.startswith(("ctx_", "x_")) for name in full)
+    leaking = [name for name, values in truncated.items() if not np.array_equal(values, full[name][:cut], equal_nan=True)]
+    assert leaking == []
+
+
+def test_feature_names_are_coin_agnostic(full_features):
+    prefixes = {name.split("_")[0] for name in full_features if name not in ("ts", "valid")}
+    assert prefixes == {"target", "ctx", "x", "cal"}
 
 
 def test_feature_matrix_has_no_infinities(full_features):

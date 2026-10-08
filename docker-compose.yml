@@ -12,7 +12,7 @@ services:
     # box, the full history on a workstation.
     mem_limit: ${API_MEM_LIMIT:-6g}
     environment:
-      LAB_HISTORY_START: ${LAB_HISTORY_START:-2020-08}
+      LAB_HISTORY_START: ${LAB_HISTORY_START:-2017-01}
       LAB_THREADS: ${LAB_THREADS:-0}
 
   web:

@@ -40,7 +40,9 @@ class TrainRequest(BaseModel):
     label: LabelConfig = LabelConfig()
     walk_forward: WalkForward = WalkForward()
     train_stride_minutes: int = Field(5, ge=1, le=60)
-    include_btc: bool = True
+    target_symbol: str = "SOLUSDT"
+    # None = no context coin.
+    context_symbol: str | None = "BTCUSDT"
     fee_pct: float = Field(0.1, ge=0, le=1)
     lgbm: LgbmParams = LgbmParams()
 
@@ -51,13 +53,19 @@ def _with_job(run: dict[str, Any]) -> dict[str, Any]:
 
 
 @router.get("")
-def list_runs():
-    return [_with_job(run) for run in train.list_model_runs()]
+def list_runs(target: str | None = None):
+    runs = train.list_model_runs()
+    if target:
+        runs = [run for run in runs if run["params"].get("target_symbol") == target.upper()]
+    return [_with_job(run) for run in runs]
 
 
 @router.post("")
 def create_run(request: TrainRequest):
-    run = train.create_model_run(request.model_dump())
+    try:
+        run = train.create_model_run(request.model_dump())
+    except ValueError as error:
+        raise HTTPException(400, str(error))
     job = jobs.create_job("train", {"run_id": run["id"]})
     train.attach_job(run["id"], job["id"])
     return _with_job(train.get_model_run(run["id"]))

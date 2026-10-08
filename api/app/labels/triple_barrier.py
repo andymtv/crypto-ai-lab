@@ -23,7 +23,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from ..config import FEATURES_DIR, TARGET_SYMBOL
+from ..config import FEATURES_DIR
 from ..data.series import open_series
 
 ENTRY_SEARCH_SECONDS = 10
@@ -127,12 +127,12 @@ def normalize_label_config(config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def labels_path(config: dict[str, Any]):
-    return FEATURES_DIR / "labels" / f"labels_{label_key(config)}.parquet"
+def labels_path(symbol: str, config: dict[str, Any]):
+    return FEATURES_DIR / "labels" / f"labels_{symbol}_{label_key(config)}.parquet"
 
 
-def compute_labels(decision_ts: np.ndarray, config: dict[str, Any], ctx=None) -> pd.DataFrame:
-    series = open_series(TARGET_SYMBOL)
+def compute_labels(symbol: str, decision_ts: np.ndarray, config: dict[str, Any], ctx=None) -> pd.DataFrame:
+    series = open_series(symbol)
     decision_index = (decision_ts - series.t0).astype(np.int64)
     open_ = np.asarray(series.open)
     high = np.asarray(series.high)
@@ -172,14 +172,14 @@ def compute_labels(decision_ts: np.ndarray, config: dict[str, Any], ctx=None) ->
     return frame
 
 
-def ensure_labels(feature_ts: np.ndarray, config: dict[str, Any], ctx=None) -> pd.DataFrame:
+def ensure_labels(symbol: str, feature_ts: np.ndarray, config: dict[str, Any], ctx=None) -> pd.DataFrame:
     """Labels for every feature row (keyed by the row's bar open `ts`), cached on disk."""
-    path = labels_path(config)
+    path = labels_path(symbol, config)
     if path.exists():
         cached = pq.read_table(path).to_pandas()
-        if len(cached) == len(feature_ts) and cached["ts"].iloc[-1] == feature_ts[-1]:
+        if len(cached) == len(feature_ts) and cached["ts"].iloc[0] == feature_ts[0] and cached["ts"].iloc[-1] == feature_ts[-1]:
             return cached
-    frame = compute_labels(feature_ts + 60, config, ctx)
+    frame = compute_labels(symbol, feature_ts + 60, config, ctx)
     frame.insert(0, "ts", feature_ts)
     path.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(pa.Table.from_pandas(frame, preserve_index=False), path, compression="zstd")

@@ -30,7 +30,8 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
 from .. import db
-from ..config import MODELS_DIR, THREADS
+from ..config import DEFAULT_CONTEXT, DEFAULT_TARGET, MODELS_DIR, THREADS
+from ..data.symbols import normalize_symbol
 from ..features.build import build_features, features_are_current, load_features, load_features_meta
 from ..labels.triple_barrier import ensure_labels, normalize_label_config
 from .walkforward import Fold, make_folds
@@ -56,9 +57,16 @@ def normalize_params(params: dict[str, Any]) -> dict[str, Any]:
     model_type = params.get("model_type", "lgbm")
     if model_type not in MODEL_TYPES:
         raise ValueError(f"model_type must be one of {MODEL_TYPES}")
+    target = normalize_symbol(params.get("target_symbol") or DEFAULT_TARGET)
+    context = params.get("context_symbol", DEFAULT_CONTEXT)
+    context = normalize_symbol(context) if context else None
+    if context == target:
+        raise ValueError("The context coin must differ from the traded coin.")
     return {
-        "name": params.get("name") or f"{model_type} {time.strftime('%Y-%m-%d %H:%M')}",
+        "name": params.get("name") or f"{target} {model_type} {time.strftime('%Y-%m-%d %H:%M')}",
         "model_type": model_type,
+        "target_symbol": target,
+        "context_symbol": context,
         "label": normalize_label_config(params.get("label") or {}),
         "walk_forward": {
             "train_months": int(walk.get("train_months", 24)),
@@ -67,7 +75,6 @@ def normalize_params(params: dict[str, Any]) -> dict[str, Any]:
             "window": walk.get("window", "rolling"),
         },
         "train_stride_minutes": int(params.get("train_stride_minutes", 5)),
-        "include_btc": bool(params.get("include_btc", True)),
         "fee_pct": float(params.get("fee_pct", FEE_PCT_DEFAULT)),
         "lgbm": {
             "num_leaves": int((params.get("lgbm") or {}).get("num_leaves", 31)),
@@ -135,13 +142,8 @@ def load_oof(run_id: str) -> pd.DataFrame:
     return pq.read_table(run_dir(run_id) / "oof.parquet").to_pandas()
 
 
-def _select_columns(all_columns: list[str], include_btc: bool) -> list[str]:
-    if include_btc:
-        return list(all_columns)
-    return [column for column in all_columns if not column.startswith(("btc_", "x_"))]
-
-
 def _load_rows(
+    feature_set: tuple[str, str | None],
     columns: list[str],
     labels: pd.DataFrame,
     start_ts: int,
@@ -152,7 +154,7 @@ def _load_rows(
     parts = []
     for chunk_start in range(start_ts, end_ts, MONTH_SECONDS):
         chunk_end = min(chunk_start + MONTH_SECONDS, end_ts)
-        frame = load_features(columns, chunk_start, chunk_end)
+        frame = load_features(*feature_set, columns, chunk_start, chunk_end)
         if stride_minutes > 1:
             frame = frame[(frame["ts"] // 60) % stride_minutes == 0]
         frame = frame[frame["valid"]]
@@ -283,15 +285,17 @@ def train_model_run(job_params: dict[str, Any], ctx) -> dict[str, Any]:
     started = time.time()
 
     try:
-        if not features_are_current():
-            build_features({}, SubProgress(ctx, 0.0, 0.2))
-        meta = load_features_meta()
+        target, context = params["target_symbol"], params["context_symbol"]
+        feature_set = (target, context)
+        if not features_are_current(target, context):
+            build_features({"target": target, "context": context}, SubProgress(ctx, 0.0, 0.2))
+        meta = load_features_meta(target, context)
         assert meta is not None
-        columns = _select_columns(meta["columns"], params["include_btc"])
+        columns = list(meta["columns"])
 
         ctx.progress(0.2, "Preparing labels", force=True)
-        feature_ts = load_features([], None, None)["ts"].to_numpy()
-        labels = ensure_labels(feature_ts, params["label"], SubProgress(ctx, 0.2, 0.1))
+        feature_ts = load_features(target, context, [])["ts"].to_numpy()
+        labels = ensure_labels(target, feature_ts, params["label"], SubProgress(ctx, 0.2, 0.1))
         labels = labels[["ts", "label", "outcome", "exit_return", "exit_seconds"]]
 
         label = params["label"]
@@ -318,8 +322,8 @@ def train_model_run(job_params: dict[str, Any], ctx) -> dict[str, Any]:
         for fold in folds:
             base = 0.3 + 0.6 * fold.index / len(folds)
             ctx.progress(base, f"Fold {fold.index + 1}/{len(folds)}: loading training rows", force=True)
-            x_train, y_train = _load_rows(columns, labels, fold.train_start, fold.train_end, params["train_stride_minutes"])
-            x_valid, y_valid = _load_rows(columns, labels, fold.valid_start, fold.valid_end, params["train_stride_minutes"])
+            x_train, y_train = _load_rows(feature_set, columns, labels, fold.train_start, fold.train_end, params["train_stride_minutes"])
+            x_valid, y_valid = _load_rows(feature_set, columns, labels, fold.valid_start, fold.valid_end, params["train_stride_minutes"])
             if len(x_train) < 1000 or len(x_valid) < 100:
                 continue
 
@@ -334,7 +338,7 @@ def train_model_run(job_params: dict[str, Any], ctx) -> dict[str, Any]:
             del x_train, x_valid
 
             ctx.progress(base + 0.45 / len(folds), f"Fold {fold.index + 1}/{len(folds)}: predicting the test window")
-            x_test, y_test = _load_rows(columns, labels, fold.test_start, fold.test_end, 1)
+            x_test, y_test = _load_rows(feature_set, columns, labels, fold.test_start, fold.test_end, 1)
             if len(x_test) == 0:
                 continue
             probability = _predict(model_type, model, x_test)
@@ -364,7 +368,7 @@ def train_model_run(job_params: dict[str, Any], ctx) -> dict[str, Any]:
         ctx.progress(0.92, "Fitting the final model on the most recent window", force=True)
         last_fold = folds[-1]
         final_start = max(meta["first_ts"], last_fold.test_end - walk["train_months"] * MONTH_SECONDS)
-        x_final, y_final = _load_rows(columns, labels, final_start, last_fold.test_end, params["train_stride_minutes"])
+        x_final, y_final = _load_rows(feature_set, columns, labels, final_start, last_fold.test_end, params["train_stride_minutes"])
         final_rounds = int(np.median(best_rounds)) if best_rounds else None
         final_model, _ = _fit(model_type, params, x_final, y_final["label"].to_numpy(), None, None, rounds=final_rounds)
         if model_type == "lgbm":

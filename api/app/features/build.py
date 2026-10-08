@@ -11,12 +11,14 @@ by then:
 `tests/test_features_leakage.py` checks this by rebuilding on truncated data.
 
 Groups:
-- per coin (sol_*, btc_*): multi-window returns, 1s-based realized volatility,
+- per coin (target_* for the traded coin, ctx_* for the context coin, e.g.
+  BTC): multi-window returns, 1s-based realized volatility,
   ranges, volume / trade / taker-flow statistics, Donchian and VWAP position,
   RSI / MACD / Bollinger / ATR / EMA distances / ADX on 5m, 15m and 1h bars.
-- SOL candle shapes of the last five 5m bars (the model learns patterns).
-- SOL vs BTC: rolling beta / correlation, BTC-minus-SOL return gaps (BTC tends
-  to lead), SOL residual return after BTC beta.
+- target candle shapes of the last five 5m bars (the model learns patterns).
+- target vs context (x_*): rolling beta / correlation, context-lead gaps (BTC
+  tends to lead alts), the target's residual return after the context beta.
+  Without a context coin these groups are simply absent.
 - calendar: hour of day and day of week (cyclical).
 """
 
@@ -31,7 +33,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from ..config import CONTEXT_SYMBOL, FEATURES_DIR, TARGET_SYMBOL
+from ..config import FEATURES_DIR
 from ..data.series import bars_path, load_minute_bars
 from . import indicators as ta
 
@@ -45,12 +47,16 @@ CANDLE_LOOKBACK = 5
 FORWARD_FILL_LIMIT_MINUTES = 30
 
 
-def features_path(feature_set: str = FEATURE_SET):
-    return FEATURES_DIR / f"features_{feature_set}.parquet"
+def feature_key(target: str, context: str | None) -> str:
+    return f"{target}__{context or 'none'}__{FEATURE_SET}"
 
 
-def features_meta_path(feature_set: str = FEATURE_SET):
-    return FEATURES_DIR / f"features_{feature_set}.json"
+def features_path(target: str, context: str | None):
+    return FEATURES_DIR / f"features_{feature_key(target, context)}.parquet"
+
+
+def features_meta_path(target: str, context: str | None):
+    return FEATURES_DIR / f"features_{feature_key(target, context)}.json"
 
 
 def _f32(values: pd.Series | np.ndarray) -> np.ndarray:
@@ -88,7 +94,7 @@ def higher_timeframe(frame: pd.DataFrame, minutes: int) -> pd.DataFrame:
     return htf
 
 
-def coin_features(frame: pd.DataFrame, prefix: str, out: dict[str, np.ndarray]) -> None:
+def coin_features(frame: pd.DataFrame, prefix: str, out: dict[str, np.ndarray], candles: bool = False) -> None:
     close = frame["close"].ffill(limit=FORWARD_FILL_LIMIT_MINUTES)
     high = frame["high"].fillna(close)
     low = frame["low"].fillna(close)
@@ -149,7 +155,7 @@ def coin_features(frame: pd.DataFrame, prefix: str, out: dict[str, np.ndarray]) 
         for name, series in values.items():
             out[f"{prefix}_{label}_{name}"] = _f32(series.reindex(grid_index, method="ffill"))
 
-        if prefix == "sol" and label == "5m":
+        if candles and label == "5m":
             body_base = h_atr.replace(0, np.nan)
             top = htf[["open", "close"]].max(axis=1)
             bottom = htf[["open", "close"]].min(axis=1)
@@ -160,32 +166,32 @@ def coin_features(frame: pd.DataFrame, prefix: str, out: dict[str, np.ndarray]) 
             }
             for lag in range(CANDLE_LOOKBACK):
                 for name, series in shapes.items():
-                    out[f"sol_candle{lag}_{name}"] = _f32(series.shift(lag).reindex(grid_index, method="ffill"))
+                    out[f"{prefix}_candle{lag}_{name}"] = _f32(series.shift(lag).reindex(grid_index, method="ffill"))
 
 
-def cross_features(sol: pd.DataFrame, btc: pd.DataFrame, out: dict[str, np.ndarray]) -> None:
-    sol_close = np.log(sol["close"].ffill(limit=FORWARD_FILL_LIMIT_MINUTES))
-    btc_close = np.log(btc["close"].ffill(limit=FORWARD_FILL_LIMIT_MINUTES))
-    sol_r1 = sol_close.diff()
-    btc_r1 = btc_close.diff()
+def cross_features(target: pd.DataFrame, context: pd.DataFrame, out: dict[str, np.ndarray]) -> None:
+    target_close = np.log(target["close"].ffill(limit=FORWARD_FILL_LIMIT_MINUTES))
+    context_close = np.log(context["close"].ffill(limit=FORWARD_FILL_LIMIT_MINUTES))
+    target_r1 = target_close.diff()
+    context_r1 = context_close.diff()
 
     for window in CORR_WINDOWS:
-        covariance = sol_r1.rolling(window, min_periods=window).cov(btc_r1)
-        variance = btc_r1.rolling(window, min_periods=window).var()
+        covariance = target_r1.rolling(window, min_periods=window).cov(context_r1)
+        variance = context_r1.rolling(window, min_periods=window).var()
         beta = covariance / variance.replace(0, np.nan)
         out[f"x_beta_{window}m"] = _f32(beta)
-        out[f"x_corr_{window}m"] = _f32(sol_r1.rolling(window, min_periods=window).corr(btc_r1))
+        out[f"x_corr_{window}m"] = _f32(target_r1.rolling(window, min_periods=window).corr(context_r1))
 
-    beta_240 = pd.Series(out["x_beta_240m"], index=sol.index).astype(np.float64)
+    beta_240 = pd.Series(out["x_beta_240m"], index=target.index).astype(np.float64)
     for window in (1, 2, 3, 5, 15):
-        sol_ret = sol_close - sol_close.shift(window)
-        btc_ret = btc_close - btc_close.shift(window)
-        # BTC moved, SOL has not caught up yet (scaled by SOL's beta).
-        out[f"x_btc_lead_gap_{window}m"] = _f32(beta_240 * btc_ret - sol_ret)
+        target_ret = target_close - target_close.shift(window)
+        context_ret = context_close - context_close.shift(window)
+        # The context coin moved, the target has not caught up yet (scaled by beta).
+        out[f"x_ctx_lead_gap_{window}m"] = _f32(beta_240 * context_ret - target_ret)
     for window in (15, 60, 240):
-        sol_ret = sol_close - sol_close.shift(window)
-        btc_ret = btc_close - btc_close.shift(window)
-        out[f"x_sol_residual_{window}m"] = _f32(sol_ret - beta_240 * btc_ret)
+        target_ret = target_close - target_close.shift(window)
+        context_ret = context_close - context_close.shift(window)
+        out[f"x_target_residual_{window}m"] = _f32(target_ret - beta_240 * context_ret)
 
 
 def calendar_features(grid: np.ndarray, out: dict[str, np.ndarray]) -> None:
@@ -198,25 +204,32 @@ def calendar_features(grid: np.ndarray, out: dict[str, np.ndarray]) -> None:
     out["cal_dow_cos"] = np.cos(2 * np.pi * day / 7).astype(np.float32)
 
 
-def compute_features(sol_bars: pd.DataFrame, btc_bars: pd.DataFrame, ctx=None) -> dict[str, np.ndarray]:
-    """Feature columns (float32) plus `ts` and `valid` for the shared minute grid."""
-    start = int(max(sol_bars["ts"].min(), btc_bars["ts"].min()))
-    end = int(min(sol_bars["ts"].max(), btc_bars["ts"].max()))
+def compute_features(target_bars: pd.DataFrame, context_bars: pd.DataFrame | None, ctx=None) -> dict[str, np.ndarray]:
+    """Feature columns (float32) plus `ts` and `valid` on the minute grid.
+
+    With a context coin the grid is the range both coins cover.
+    """
+    start = int(target_bars["ts"].min())
+    end = int(target_bars["ts"].max())
+    if context_bars is not None:
+        start = max(start, int(context_bars["ts"].min()))
+        end = min(end, int(context_bars["ts"].max()))
     grid = np.arange(start, end + 1, 60, dtype=np.int64)
 
-    sol = align_to_grid(sol_bars, grid)
-    btc = align_to_grid(btc_bars, grid)
-    out: dict[str, np.ndarray] = {"ts": grid, "valid": sol["present"].to_numpy()}
+    target = align_to_grid(target_bars, grid)
+    out: dict[str, np.ndarray] = {"ts": grid, "valid": target["present"].to_numpy()}
 
     if ctx:
-        ctx.progress(0.1, "Computing SOL features")
-    coin_features(sol, "sol", out)
-    if ctx:
-        ctx.progress(0.45, "Computing BTC features")
-    coin_features(btc, "btc", out)
-    if ctx:
-        ctx.progress(0.8, "Computing SOL/BTC cross features")
-    cross_features(sol, btc, out)
+        ctx.progress(0.1, "Computing target-coin features")
+    coin_features(target, "target", out, candles=True)
+    if context_bars is not None:
+        context = align_to_grid(context_bars, grid)
+        if ctx:
+            ctx.progress(0.45, "Computing context-coin features")
+        coin_features(context, "ctx", out)
+        if ctx:
+            ctx.progress(0.8, "Computing cross features")
+        cross_features(target, context, out)
     calendar_features(grid, out)
     return out
 
@@ -225,23 +238,26 @@ def feature_columns(columns: list[str]) -> list[str]:
     return [column for column in columns if column not in ("ts", "valid")]
 
 
-def build_features(params: dict[str, Any] | None, ctx) -> dict[str, Any]:
+def build_features(params: dict[str, Any], ctx) -> dict[str, Any]:
+    target = params["target"]
+    context = params.get("context") or None
     started = time.time()
-    ctx.progress(0.02, "Loading 1m bars", force=True)
-    sol_bars = load_minute_bars(TARGET_SYMBOL)
-    btc_bars = load_minute_bars(CONTEXT_SYMBOL)
-    out = compute_features(sol_bars, btc_bars, ctx)
-    del sol_bars, btc_bars
+    ctx.progress(0.02, f"Loading 1m bars for {target}{' + ' + context if context else ''}", force=True)
+    target_bars = load_minute_bars(target)
+    context_bars = load_minute_bars(context) if context else None
+    out = compute_features(target_bars, context_bars, ctx)
+    del target_bars, context_bars
 
     ctx.progress(0.9, "Writing feature matrix", force=True)
     FEATURES_DIR.mkdir(parents=True, exist_ok=True)
-    table = pa.table(out)
-    path = features_path()
+    path = features_path(target, context)
     tmp = path.with_suffix(".tmp")
-    pq.write_table(table, tmp, compression="zstd", row_group_size=1 << 18)
+    pq.write_table(pa.table(out), tmp, compression="zstd", row_group_size=1 << 18)
     tmp.replace(path)
 
     meta = {
+        "target": target,
+        "context": context,
         "feature_set": FEATURE_SET,
         "rows": int(len(out["ts"])),
         "columns": feature_columns(list(out.keys())),
@@ -249,29 +265,48 @@ def build_features(params: dict[str, Any] | None, ctx) -> dict[str, Any]:
         "last_ts": int(out["ts"][-1]),
         "built_at": time.time(),
         "build_seconds": round(time.time() - started, 1),
-        "source_bars_mtime": max(bars_path(TARGET_SYMBOL).stat().st_mtime, bars_path(CONTEXT_SYMBOL).stat().st_mtime),
+        "source_bars_mtime": _source_mtime(target, context),
     }
-    features_meta_path().write_text(json.dumps(meta, indent=1))
+    features_meta_path(target, context).write_text(json.dumps(meta, indent=1))
     return {key: value for key, value in meta.items() if key != "columns"} | {"feature_count": len(meta["columns"])}
 
 
-def load_features_meta() -> dict[str, Any] | None:
-    path = features_meta_path()
+def _source_mtime(target: str, context: str | None) -> float:
+    paths = [bars_path(target)] + ([bars_path(context)] if context else [])
+    return max(path.stat().st_mtime for path in paths)
+
+
+def load_features_meta(target: str, context: str | None) -> dict[str, Any] | None:
+    path = features_meta_path(target, context)
     return json.loads(path.read_text()) if path.exists() else None
 
 
-def features_are_current() -> bool:
-    meta = load_features_meta()
-    if meta is None or not features_path().exists():
+def list_feature_sets() -> list[dict[str, Any]]:
+    metas = []
+    for path in sorted(FEATURES_DIR.glob("features_*.json")):
+        meta = json.loads(path.read_text())
+        metas.append({key: value for key, value in meta.items() if key != "columns"} | {"feature_count": len(meta["columns"])})
+    return metas
+
+
+def features_are_current(target: str, context: str | None) -> bool:
+    meta = load_features_meta(target, context)
+    if meta is None or not features_path(target, context).exists():
         return False
     try:
-        latest_bars = max(bars_path(TARGET_SYMBOL).stat().st_mtime, bars_path(CONTEXT_SYMBOL).stat().st_mtime)
+        latest_bars = _source_mtime(target, context)
     except FileNotFoundError:
         return True
     return meta.get("source_bars_mtime", 0) >= latest_bars
 
 
-def load_features(columns: list[str] | None = None, start_ts: int | None = None, end_ts: int | None = None) -> pd.DataFrame:
+def load_features(
+    target: str,
+    context: str | None,
+    columns: list[str] | None = None,
+    start_ts: int | None = None,
+    end_ts: int | None = None,
+) -> pd.DataFrame:
     """Feature rows in [start_ts, end_ts), only the requested columns (plus ts, valid)."""
     wanted = None if columns is None else ["ts", "valid", *columns]
     filters = []
@@ -279,5 +314,5 @@ def load_features(columns: list[str] | None = None, start_ts: int | None = None,
         filters.append(("ts", ">=", int(start_ts)))
     if end_ts is not None:
         filters.append(("ts", "<", int(end_ts)))
-    table = pq.read_table(features_path(), columns=wanted, filters=filters or None)
+    table = pq.read_table(features_path(target, context), columns=wanted, filters=filters or None)
     return table.to_pandas()

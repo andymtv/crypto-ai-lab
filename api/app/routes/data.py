@@ -5,12 +5,13 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .. import jobs
-from ..config import SYMBOLS, TARGET_SYMBOL
+from ..config import DEFAULT_SYMBOLS, DEFAULT_TARGET
+from ..data.symbols import local_symbols, normalize_symbol, symbol_info
 from ..data.series import coverage, load_minute_bars
-from ..features.build import load_features_meta
+from ..features.build import list_feature_sets, load_features_meta
 
 router = APIRouter(tags=["data"])
 
@@ -20,7 +21,26 @@ _bars_cache: dict[str, tuple[float, pd.DataFrame]] = {}
 
 
 class DownloadRequest(BaseModel):
-    start_month: str | None = None
+    symbols: list[str] | None = None
+    start_month: str | None = Field(None, pattern=r"^\d{4}-\d{2}$")
+
+
+class BuildRequest(BaseModel):
+    symbols: list[str] | None = None
+
+
+class FeaturesRequest(BaseModel):
+    target: str = DEFAULT_TARGET
+    context: str | None = "BTCUSDT"
+
+
+def _symbols(values: list[str] | None) -> list[str] | None:
+    if not values:
+        return None
+    try:
+        return [normalize_symbol(value) for value in values]
+    except ValueError as error:
+        raise HTTPException(400, str(error))
 
 
 def _active(kind: str) -> dict[str, Any] | None:
@@ -29,17 +49,25 @@ def _active(kind: str) -> dict[str, Any] | None:
 
 @router.get("/api/data/status")
 def data_status():
-    features = load_features_meta()
+    symbols = sorted(set(local_symbols()) | set(DEFAULT_SYMBOLS))
     return {
-        "symbols": [coverage(symbol) for symbol in SYMBOLS],
-        "features": None if features is None else {key: value for key, value in features.items() if key != "columns"} | {"feature_count": len(features["columns"])},
+        "symbols": [coverage(symbol) for symbol in symbols],
+        "features": list_feature_sets(),
         "active_jobs": {kind: _active(kind) for kind in ("download", "build_series", "build_features")},
     }
 
 
+@router.get("/api/data/symbols/validate")
+def validate_symbol(symbol: str):
+    try:
+        return symbol_info(symbol)
+    except ValueError as error:
+        raise HTTPException(400, str(error))
+
+
 @router.get("/api/data/features")
-def feature_list():
-    meta = load_features_meta()
+def feature_list(target: str = DEFAULT_TARGET, context: str | None = "BTCUSDT"):
+    meta = load_features_meta(target.upper(), context.upper() if context else None)
     if meta is None:
         raise HTTPException(404, "Features not built yet")
     return meta
@@ -49,24 +77,30 @@ def feature_list():
 def start_download(request: DownloadRequest):
     existing = _active("download")
     if existing:
-        return existing
-    return jobs.create_job("download", request.model_dump(exclude_none=True))
+        raise HTTPException(409, "A download is already running; wait for it to finish.")
+    for symbol in request.symbols or []:
+        if not symbol_info(normalize_symbol(symbol))["valid"]:
+            raise HTTPException(400, f"Binance publishes no 1s history for {symbol}.")
+    params = {"symbols": _symbols(request.symbols), "start_month": request.start_month}
+    return jobs.create_job("download", {key: value for key, value in params.items() if value})
 
 
 @router.post("/api/data/build")
-def start_build():
+def start_build(request: BuildRequest | None = None):
     existing = _active("build_series")
     if existing:
-        return existing
-    return jobs.create_job("build_series", {})
+        raise HTTPException(409, "A build is already running; wait for it to finish.")
+    symbols = _symbols(request.symbols if request else None)
+    return jobs.create_job("build_series", {"symbols": symbols} if symbols else {})
 
 
 @router.post("/api/data/features")
-def start_features():
-    existing = _active("build_features")
-    if existing:
-        return existing
-    return jobs.create_job("build_features", {})
+def start_features(request: FeaturesRequest):
+    target = _symbols([request.target])[0]
+    context = _symbols([request.context])[0] if request.context else None
+    if context == target:
+        raise HTTPException(400, "The context coin must differ from the traded coin.")
+    return jobs.create_job("build_features", {"target": target, "context": context})
 
 
 def _bars(symbol: str) -> pd.DataFrame:
@@ -82,9 +116,10 @@ def _bars(symbol: str) -> pd.DataFrame:
 
 
 @router.get("/api/market/candles")
-def candles(symbol: str = TARGET_SYMBOL, tf: str = "1h", start: int | None = None, end: int | None = None):
-    if symbol not in SYMBOLS:
-        raise HTTPException(400, f"symbol must be one of {SYMBOLS}")
+def candles(symbol: str = DEFAULT_TARGET, tf: str = "1h", start: int | None = None, end: int | None = None):
+    symbol = symbol.upper()
+    if symbol not in local_symbols():
+        raise HTTPException(404, f"No data for {symbol}")
     if tf not in TIMEFRAMES:
         raise HTTPException(400, f"tf must be one of {list(TIMEFRAMES)}")
     try:
