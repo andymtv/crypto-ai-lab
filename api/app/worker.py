@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import signal
 import sys
 import traceback
 
@@ -34,7 +35,13 @@ def run_job(kind: str, params: dict, ctx: JobContext):
     raise ValueError(f"Unknown job kind: {kind}")
 
 
+def _cancel_on_sigterm(_signum, _frame):
+    # Cancelling a job sends SIGTERM: unwind through the job's cleanup.
+    raise JobCancelled()
+
+
 def main(job_id: str) -> int:
+    signal.signal(signal.SIGTERM, _cancel_on_sigterm)
     job = get_job(job_id)
     if job is None:
         print(f"Job {job_id} not found", flush=True)

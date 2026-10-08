@@ -59,8 +59,8 @@ fitted on the most recent window.
 ### Backtest
 One long position at a time. Entry at the next second's open (+latency,
 +slippage), take profit as a limit, stop as a stop-market (gap-aware),
-timeout at market. Fees both sides, SOL quantity step, 5 USDT minimum
-notional (the coin's Binance filters). Compared against buy & hold and 30
+timeout at market. Fees both sides, the coin's Binance quantity step and
+minimum notional. Compared against buy & hold and 30
 random-timing runs that shuffle the model's own waits between trades: same
 number of trades, same exits and costs, only the timing is random. A sweep runs threshold × TP/SL grids
 (beware: picking the best combination on the same period overfits).
@@ -94,9 +94,9 @@ download/build interrupted by a restart resumes where it stopped (re-run it).
 ### Tests
 
 ```bash
-docker exec -w /app sol-ai-lab-api python -m pytest -q tests
-docker exec sol-ai-lab-web npm run build
-docker exec sol-ai-lab-web npx vitest run
+docker exec -w /app crypto-ai-lab-api python -m pytest -q tests
+docker exec crypto-ai-lab-web npm run build
+docker exec crypto-ai-lab-web npx vitest run
 ```
 
 ## Layout

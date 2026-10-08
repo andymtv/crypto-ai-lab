@@ -12,7 +12,7 @@ from .routes import data as data_routes
 from .routes import jobs as job_routes
 from .routes import models as model_routes
 
-app = FastAPI(title="SOL AI Lab", version="0.1.0")
+app = FastAPI(title="Crypto AI Lab", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

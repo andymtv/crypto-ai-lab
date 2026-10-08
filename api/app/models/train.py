@@ -30,6 +30,7 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
 from .. import db
+from ..jobs import JobCancelled
 from ..config import DEFAULT_CONTEXT, DEFAULT_TARGET, MODELS_DIR, THREADS
 from ..data.symbols import normalize_symbol
 from ..features.build import build_features, features_are_current, load_features, load_features_meta
@@ -404,6 +405,6 @@ def train_model_run(job_params: dict[str, Any], ctx) -> dict[str, Any]:
         (out_dir / "thresholds.json").write_text(json.dumps(threshold_table(oof, params["fee_pct"])))
         _set_status(run_id, "done", metrics)
         return {"run_id": run_id, **metrics}
-    except BaseException:
-        _set_status(run_id, "failed")
+    except BaseException as error:
+        _set_status(run_id, "cancelled" if isinstance(error, JobCancelled) else "failed")
         raise

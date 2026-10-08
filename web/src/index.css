@@ -1,0 +1,116 @@
+@import "tailwindcss";
+
+/*
+ * Design tokens. Neutral zinc surfaces, one blue accent, semantic trading tones.
+ * Use these via Tailwind utilities: bg-canvas, bg-surface, bg-surface-2, bg-surface-3,
+ * border-line, border-line-strong, text-fg, text-fg-muted, text-fg-subtle,
+ * bg-accent / text-accent-fg, text-positive, text-negative, text-warning.
+ */
+@theme {
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, monospace;
+
+  --color-canvas: #09090b;
+  --color-surface: #111113;
+  --color-surface-2: #18181b;
+  --color-surface-3: #1f1f24;
+  --color-line: rgb(255 255 255 / 0.07);
+  --color-line-strong: rgb(255 255 255 / 0.12);
+
+  --color-fg: #f4f4f5;
+  --color-fg-muted: #a1a1aa;
+  --color-fg-subtle: #71717a;
+
+  --color-accent: #3b82f6;
+  --color-accent-fg: #60a5fa;
+  --color-positive: #34d399;
+  --color-negative: #f87171;
+  --color-warning: #fbbf24;
+}
+
+/* Light theme: same token names, toggled via <html data-theme="light"> (see src/lib/theme.ts). */
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --color-canvas: #fafafa;
+  --color-surface: #ffffff;
+  --color-surface-2: #f4f4f5;
+  --color-surface-3: #ebebef;
+  --color-line: #e4e4e7;
+  --color-line-strong: #d4d4d8;
+
+  --color-fg: #18181b;
+  --color-fg-muted: #52525b;
+  --color-fg-subtle: #71717a;
+
+  --color-accent: #2563eb;
+  --color-accent-fg: #2563eb;
+  --color-positive: #059669;
+  --color-negative: #dc2626;
+  --color-warning: #b45309;
+}
+
+:root {
+  color-scheme: dark;
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  background: var(--color-canvas);
+  color: var(--color-fg);
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background: var(--color-canvas);
+  color: var(--color-fg);
+  font-size: 15px;
+  line-height: 1.5;
+  overflow-x: hidden;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+/* Tabular figures utility for financial numbers, rates, and counters */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+.spring-transition {
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.apple-press {
+  transition: transform 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.apple-press:active {
+  transform: scale(0.98);
+}
+
+:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--color-accent) 70%, transparent);
+  outline-offset: 2px;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--color-fg) 12%, transparent);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--color-fg) 22%, transparent);
+}

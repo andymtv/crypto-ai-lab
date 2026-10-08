@@ -13,6 +13,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from .. import db
+from ..jobs import JobCancelled
 from ..config import BACKTESTS_DIR
 from ..data.symbols import order_filters
 from ..data.series import open_series
@@ -21,6 +22,19 @@ from .engine import EngineParams, simulate, simulate_with_gaps
 
 RANDOM_BASELINE_RUNS = 30
 MAX_EQUITY_POINTS = 3000
+
+
+def finite(value: Any) -> Any:
+    """JSON-safe copy: NaN / infinity become None (JSON has no NaN)."""
+    if isinstance(value, dict):
+        return {key: finite(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [finite(item) for item in value]
+    if isinstance(value, (float, np.floating)):
+        return float(value) if np.isfinite(value) else None
+    if isinstance(value, np.integer):
+        return int(value)
+    return value
 
 
 def normalize_params(params: dict[str, Any], model_params: dict[str, Any]) -> dict[str, Any]:
@@ -122,7 +136,7 @@ def _set(backtest_id: str, status: str, summary: dict[str, Any] | None = None) -
     with db.connect() as conn:
         conn.execute(
             "UPDATE backtests SET status = ?, summary = COALESCE(?, summary) WHERE id = ?",
-            (status, json.dumps(summary) if summary is not None else None, backtest_id),
+            (status, json.dumps(finite(summary)) if summary is not None else None, backtest_id),
         )
 
 
@@ -299,9 +313,9 @@ def run_single(backtest_id: str, params: dict[str, Any], ctx) -> dict[str, Any]:
     )
     pq.write_table(pa.Table.from_pandas(trades, preserve_index=False), out / "trades.parquet", compression="zstd")
     daily = daily_equity(result, start, end, params["initial_capital"])
-    (out / "equity.json").write_text(json.dumps(downsample_equity(result, params, start)))
-    (out / "baselines.json").write_text(json.dumps({"random": random, "buy_and_hold": hold}))
-    (out / "monthly.json").write_text(json.dumps(monthly_returns(daily)))
+    (out / "equity.json").write_text(json.dumps(finite(downsample_equity(result, params, start))))
+    (out / "baselines.json").write_text(json.dumps(finite({"random": random, "buy_and_hold": hold})))
+    (out / "monthly.json").write_text(json.dumps(finite(monthly_returns(daily))))
 
     summary["vs_buy_and_hold_pct"] = summary["return_pct"] - hold["return_pct"]
     summary["random_mean_return_pct"] = random.get("mean_return_pct")
@@ -322,7 +336,7 @@ def run_sweep(backtest_id: str, params: dict[str, Any], ctx) -> dict[str, Any]:
         ctx.progress((position + 1) / len(combos), f"Sweep {position + 1}/{len(combos)}")
     out = bt_dir(backtest_id)
     out.mkdir(parents=True, exist_ok=True)
-    (out / "sweep.json").write_text(json.dumps(rows))
+    (out / "sweep.json").write_text(json.dumps(finite(rows)))
     best = max(rows, key=lambda row: row["return_pct"])
     return {"combinations": len(rows), "best": best, "start_ts": start, "end_ts": end}
 
@@ -339,8 +353,8 @@ def run_backtest_job(job_params: dict[str, Any], ctx) -> dict[str, Any]:
             summary = run_sweep(backtest_id, params, ctx)
         else:
             summary = run_single(backtest_id, params, ctx)
-    except BaseException:
-        _set(backtest_id, "failed")
+    except BaseException as error:
+        _set(backtest_id, "cancelled" if isinstance(error, JobCancelled) else "failed")
         raise
     _set(backtest_id, "done", summary)
     return {"backtest_id": backtest_id, **{key: value for key, value in summary.items() if key != "best"}}

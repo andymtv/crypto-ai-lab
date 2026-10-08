@@ -66,8 +66,10 @@ def validate_symbol(symbol: str):
 
 
 @router.get("/api/data/features")
-def feature_list(target: str = DEFAULT_TARGET, context: str | None = "BTCUSDT"):
-    meta = load_features_meta(target.upper(), context.upper() if context else None)
+def feature_list(target: str = DEFAULT_TARGET, context: str | None = None):
+    """`context` missing, empty or "none" = the feature set without a context coin."""
+    context = context.upper() if context and context.lower() != "none" else None
+    meta = load_features_meta(target.upper(), context)
     if meta is None:
         raise HTTPException(404, "Features not built yet")
     return meta

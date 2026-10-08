@@ -285,6 +285,8 @@ def list_feature_sets() -> list[dict[str, Any]]:
     metas = []
     for path in sorted(FEATURES_DIR.glob("features_*.json")):
         meta = json.loads(path.read_text())
+        if "target" not in meta:
+            continue  # pre-multi-coin leftover
         metas.append({key: value for key, value in meta.items() if key != "columns"} | {"feature_count": len(meta["columns"])})
     return metas
 
